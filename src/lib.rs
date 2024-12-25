@@ -69,7 +69,7 @@ pub mod args;
 pub mod style;
 pub mod syscall_info;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_BORDERS_ONLY;
 use comfy_table::CellAlignment::Right;
@@ -368,7 +368,12 @@ impl<W: Write> Tracer<W> {
         syscall_start_time: Option<SystemTime>,
         syscall_end_time: Option<SystemTime>,
     ) -> Result<()> {
-        let (syscall_number, registers) = self.parse_register_data(pid)?;
+        let register_data = self.parse_register_data(pid);
+        if let Err(e) = register_data {
+            eprintln!("{e}");
+            return Ok(());
+        }
+        let (syscall_number, registers) = register_data.unwrap();
 
         // Theres no PTRACE_SYSCALL_INFO_EXIT for an exit-family syscall, hence ret_code will always be 0xffffffffffffffda (which is -38)
         // -38 is ENOSYS which is put into RAX as a default return value by the kernel's syscall entry code.
@@ -437,14 +442,31 @@ impl<W: Write> Tracer<W> {
 
     fn get_syscall(&self, registers: user_regs_struct) -> Result<Sysno> {
         #[cfg(target_arch = "x86_64")]
-        let reg = registers.orig_rax;
+        {
+            let reg = registers.orig_rax;
+            if reg == u64::max_value() {
+                bail!("Invalid syscall number {}", reg);
+            }
+            (reg as u32)
+                .try_into()
+                .map_err(|_| anyhow!("Invalid syscall number {}", reg))
+        }
+
         #[cfg(target_arch = "riscv64")]
-        let reg = registers.a7;
+        {
+            let reg = registers.a7;
+            (reg as u32)
+                .try_into()
+                .map_err(|_| anyhow!("Invalid syscall number {}", reg))
+        }
+
         #[cfg(target_arch = "aarch64")]
-        let reg = registers.regs[8];
-        (reg as u32)
-            .try_into()
-            .map_err(|_| anyhow!("Invalid syscall number {}", reg))
+        {
+            let reg = registers.regs[8];
+            (reg as u32)
+                .try_into()
+                .map_err(|_| anyhow!("Invalid syscall number {}", reg))
+        }
     }
 
     // Issues a ptrace(PTRACE_GETREGS, ...) request and gets the corresponding syscall number (Sysno).
